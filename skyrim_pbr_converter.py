@@ -1,4 +1,4 @@
-# skyrim_pbr_converter_final_v3.py
+# skyrim_pbr_converter_final_v16.py
 # Requisitos: Pillow, numpy, PyQt5, os, subprocess
 
 import os
@@ -40,22 +40,113 @@ def convert_normal_to_directx_np(normal_np):
     normal_out_np[..., 1] = 1.0 - normal_out_np[..., 1]
     return normal_out_np
 
-def apply_specular_np(normal_np, roughness_np, roughness_strength=1.0):
-    """Applies a specular map (inverted roughness) to the alpha channel of a normal map."""
-    specular_map = 1.0 - roughness_np
-    specular_map_mod = specular_map * roughness_strength
-    
-    if specular_map_mod.ndim == 2:
-        specular_map_mod = specular_map_mod[..., np.newaxis]
+# ---------- Improved Specular Methods ----------
+def apply_metallic_as_specular_np(normal_np, metallic_np, metallic_strength=1.0):
+    """Usa el mapa metálico como especularidad - mejor para materiales metálicos."""
+    if metallic_np.ndim == 2:
+        metallic_np = metallic_np[..., np.newaxis]
         
+    metallic_mod = metallic_np * metallic_strength
+    
     if normal_np.shape[2] == 3:
         normal_with_alpha = np.dstack((normal_np, np.ones_like(normal_np[..., 0:1])))
     else:
         normal_with_alpha = normal_np.copy()
 
-    normal_with_alpha[..., 3] = specular_map_mod[..., 0]
+    normal_with_alpha[..., 3] = metallic_mod[..., 0]
     return normal_with_alpha
 
+def apply_hybrid_specular_np(normal_np, metallic_np, roughness_np, metallic_weight=0.7, roughness_weight=0.3):
+    """Combina metallic y roughness invertido - equilibrio para la mayoría de materiales."""
+    if metallic_np is None and roughness_np is None:
+        return normal_np
+        
+    # Inicializar resultado
+    if metallic_np is not None:
+        if metallic_np.ndim == 2:
+            metallic_np = metallic_np[..., np.newaxis]
+        metallic_component = metallic_np * metallic_weight
+    else:
+        metallic_component = np.zeros_like(normal_np[..., 0:1])
+    
+    if roughness_np is not None:
+        if roughness_np.ndim == 2:
+            roughness_np = roughness_np[..., np.newaxis]
+        # Invertir roughness y aplicar peso
+        roughness_component = (1.0 - roughness_np) * roughness_weight
+    else:
+        roughness_component = np.zeros_like(normal_np[..., 0:1])
+    
+    # Combinar componentes
+    hybrid_specular = metallic_component + roughness_component
+    hybrid_specular = np.clip(hybrid_specular, 0.0, 1.0)
+    
+    if normal_np.shape[2] == 3:
+        normal_with_alpha = np.dstack((normal_np, np.ones_like(normal_np[..., 0:1])))
+    else:
+        normal_with_alpha = normal_np.copy()
+
+    normal_with_alpha[..., 3] = hybrid_specular[..., 0]
+    return normal_with_alpha
+
+def apply_enhanced_roughness_specular_np(normal_np, roughness_np, roughness_strength=1.0, 
+                                        contrast_boost=1.2, brightness_offset=0.1):
+    """Versión mejorada de roughness invertido con ajustes para mejor resultado en Skyrim."""
+    if roughness_np.ndim == 2:
+        roughness_np = roughness_np[..., np.newaxis]
+    
+    # Invertir roughness
+    inverted_roughness = 1.0 - roughness_np
+    
+    # Aplicar mejoras: contraste y brillo
+    enhanced_specular = ((inverted_roughness - 0.5) * contrast_boost + 0.5) + brightness_offset
+    enhanced_specular = np.clip(enhanced_specular * roughness_strength, 0.0, 1.0)
+    
+    if normal_np.shape[2] == 3:
+        normal_with_alpha = np.dstack((normal_np, np.ones_like(normal_np[..., 0:1])))
+    else:
+        normal_with_alpha = normal_np.copy()
+
+    normal_with_alpha[..., 3] = enhanced_specular[..., 0]
+    return normal_with_alpha
+
+def apply_specular_np_improved(normal_np, roughness_np=None, metallic_np=None, 
+                              specular_method="hybrid", roughness_strength=1.0,
+                              metallic_weight=0.7, roughness_weight=0.3):
+    """
+    Función mejorada para aplicar especularidad al canal alpha del normal map.
+    """
+    
+    if specular_method == "metallic" and metallic_np is not None:
+        return apply_metallic_as_specular_np(normal_np, metallic_np, roughness_strength)
+    
+    elif specular_method == "hybrid" and (metallic_np is not None or roughness_np is not None):
+        return apply_hybrid_specular_np(normal_np, metallic_np, roughness_np, 
+                                       metallic_weight, roughness_weight)
+    
+    elif specular_method == "enhanced_roughness" and roughness_np is not None:
+        return apply_enhanced_roughness_specular_np(normal_np, roughness_np, roughness_strength)
+    
+    elif specular_method == "roughness" and roughness_np is not None:
+        # Método original
+        specular_map = 1.0 - roughness_np
+        specular_map_mod = specular_map * roughness_strength
+        
+        if specular_map_mod.ndim == 2:
+            specular_map_mod = specular_map_mod[..., np.newaxis]
+            
+        if normal_np.shape[2] == 3:
+            normal_with_alpha = np.dstack((normal_np, np.ones_like(normal_np[..., 0:1])))
+        else:
+            normal_with_alpha = normal_np.copy()
+
+        normal_with_alpha[..., 3] = specular_map_mod[..., 0]
+        return normal_with_alpha
+    
+    else:
+        return normal_np
+
+# ---------- Other Utility Functions ----------
 def darken_albedo_metallic_np(albedo_np, metallic_np, metallic_strength=1.0):
     """Darkens albedo based on a metallic map to improve cubemap appearance."""
     if metallic_np.ndim == 2:
@@ -74,11 +165,20 @@ def apply_opacity_mask_np(albedo_np, mask_np, opacity=1.0):
     albedo_np[..., 3] = np.clip(mask_np[..., 0] * opacity, 0.0, 1.0)
     return albedo_np
 
+def darken_metallic_np(metallic_np, darken_strength=1.0):
+    """Darkens a metallic texture using a multiplication factor."""
+    if metallic_np.ndim == 2:
+        metallic_np = metallic_np[..., np.newaxis]
+    
+    out_metallic = metallic_np * (1.0 - darken_strength)
+    
+    return out_metallic.squeeze()
+
 # ---------- GUI ----------
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Skyrim PBR -> Preview")
+        self.setWindowTitle("Skyrim PBR -> Preview (Enhanced)")
         self.preview_size = (512, 512)
 
         self.albedo = None
@@ -113,7 +213,7 @@ class MainWindow(QWidget):
         preview_selector_layout = QHBoxLayout()
         preview_selector_layout.addWidget(QLabel("View:"))
         self.preview_selector = QComboBox()
-        self.preview_selector.addItems(["Albedo Output", "Normal Output", "Roughness Map", "Metallic Map", "AO Map"])
+        self.preview_selector.addItems(["Albedo Output", "Normal Output", "Metallic Map"])
         self.preview_selector.currentIndexChanged.connect(self.process_and_preview)
         preview_selector_layout.addWidget(self.preview_selector)
         left_layout.addLayout(preview_selector_layout)
@@ -174,9 +274,24 @@ class MainWindow(QWidget):
         normal_type_layout.addWidget(self.normal_type_selector)
         normal_grid.addLayout(normal_type_layout, 1, 0, 1, 4)
 
-        self.roughness_line = self.create_texture_row("Roughness:", normal_grid, 2, self.load_roughness, self.remove_roughness)
+        # NEW: Specular method selector
+        specular_method_layout = QHBoxLayout()
+        specular_method_layout.addWidget(QLabel("Specular Method:"))
+        self.specular_method_selector = QComboBox()
+        self.specular_method_selector.addItems([
+            "Roughness Inverted", 
+            "Metallic as Specular", 
+            "Hybrid (Recommended)", 
+            "Enhanced Roughness"
+        ])
+        self.specular_method_selector.setCurrentIndex(2)  # Default to Hybrid
+        self.specular_method_selector.currentIndexChanged.connect(self.process_and_preview)
+        specular_method_layout.addWidget(self.specular_method_selector)
+        normal_grid.addLayout(specular_method_layout, 2, 0, 1, 4)
+
+        self.roughness_line = self.create_texture_row("Roughness:", normal_grid, 3, self.load_roughness, self.remove_roughness)
         roughness_slider_layout = QHBoxLayout()
-        roughness_slider_label = QLabel("Roughness to Specular Strength:")
+        roughness_slider_label = QLabel("Specular Strength:")
         self.roughness_slider = QSlider(Qt.Horizontal)
         self.roughness_slider.setMinimum(0)
         self.roughness_slider.setMaximum(100)
@@ -184,7 +299,26 @@ class MainWindow(QWidget):
         self.roughness_slider.valueChanged.connect(self.process_and_preview)
         roughness_slider_layout.addWidget(roughness_slider_label)
         roughness_slider_layout.addWidget(self.roughness_slider)
-        normal_grid.addLayout(roughness_slider_layout, 3, 0, 1, 4)
+        normal_grid.addLayout(roughness_slider_layout, 4, 0, 1, 4)
+
+        # NEW: Hybrid method weight controls
+        hybrid_weights_layout = QHBoxLayout()
+        hybrid_weights_layout.addWidget(QLabel("Metallic Weight:"))
+        self.metallic_weight_slider = QSlider(Qt.Horizontal)
+        self.metallic_weight_slider.setMinimum(0)
+        self.metallic_weight_slider.setMaximum(100)
+        self.metallic_weight_slider.setValue(70)
+        self.metallic_weight_slider.valueChanged.connect(self.process_and_preview)
+        hybrid_weights_layout.addWidget(self.metallic_weight_slider)
+        
+        hybrid_weights_layout.addWidget(QLabel("Roughness Weight:"))
+        self.roughness_weight_slider = QSlider(Qt.Horizontal)
+        self.roughness_weight_slider.setMinimum(0)
+        self.roughness_weight_slider.setMaximum(100)
+        self.roughness_weight_slider.setValue(30)
+        self.roughness_weight_slider.valueChanged.connect(self.process_and_preview)
+        hybrid_weights_layout.addWidget(self.roughness_weight_slider)
+        normal_grid.addLayout(hybrid_weights_layout, 5, 0, 1, 4)
 
         right_layout.addWidget(normal_group_box)
         
@@ -194,11 +328,23 @@ class MainWindow(QWidget):
         other_group_box.setLayout(other_grid)
         
         self.metallic_other_line = self.create_texture_row("Metallic:", other_grid, 0, self.load_metallic_other, self.remove_metallic_other)
-        self.mask_line = self.create_texture_row("Opacity:", other_grid, 1, self.load_mask, self.remove_mask)
-
+        
+        metallic_darken_slider_layout = QHBoxLayout()
+        metallic_darken_label = QLabel("Darken Metallic Map:")
+        self.metallic_darken_slider = QSlider(Qt.Horizontal)
+        self.metallic_darken_slider.setMinimum(0)
+        self.metallic_darken_slider.setMaximum(100)
+        self.metallic_darken_slider.setValue(0)
+        self.metallic_darken_slider.valueChanged.connect(self.process_and_preview)
+        metallic_darken_slider_layout.addWidget(metallic_darken_label)
+        metallic_darken_slider_layout.addWidget(self.metallic_darken_slider)
+        other_grid.addLayout(metallic_darken_slider_layout, 1, 0, 1, 4)
+        
+        self.mask_line = self.create_texture_row("Opacity:", other_grid, 2, self.load_mask, self.remove_mask)
+        
         right_layout.addWidget(other_group_box)
         
-        # Output folder selection
+        # Output folder selection and prefix
         output_folder_layout = QHBoxLayout()
         output_folder_layout.addWidget(QLabel("Output Folder:"))
         self.output_folder_line = QLineEdit()
@@ -208,6 +354,13 @@ class MainWindow(QWidget):
         self.browse_folder_btn.clicked.connect(self.select_output_folder)
         output_folder_layout.addWidget(self.browse_folder_btn)
         right_layout.addLayout(output_folder_layout)
+        
+        # Prefix field
+        prefix_layout = QHBoxLayout()
+        prefix_layout.addWidget(QLabel("File Prefix:"))
+        self.prefix_line = QLineEdit()
+        prefix_layout.addWidget(self.prefix_line)
+        right_layout.addLayout(prefix_layout)
 
         # Output buttons
         output_layout = QHBoxLayout()
@@ -219,6 +372,10 @@ class MainWindow(QWidget):
         self.save_normal_btn.clicked.connect(self.save_normal_output)
         output_layout.addWidget(self.save_normal_btn)
         
+        self.save_metallic_btn = QPushButton("Save Metallic Output")
+        self.save_metallic_btn.clicked.connect(self.save_metallic_output)
+        output_layout.addWidget(self.save_metallic_btn)
+
         right_layout.addLayout(output_layout)
         right_layout.addStretch(1)
 
@@ -244,7 +401,7 @@ class MainWindow(QWidget):
         
         return file_line
 
-    # ---------- Load / Remove ----------
+    # ---------- Load / Remove Functions ----------
     def load_albedo(self):
         p, _ = QFileDialog.getOpenFileName(self, "Open Albedo")
         if p:
@@ -381,79 +538,138 @@ class MainWindow(QWidget):
             if self.normal_type_selector.currentText() == "OpenGL":
                 preview_np = convert_normal_to_directx_np(preview_np)
             
-            if self.roughness_preview_np is not None:
-                roughness_strength = self.roughness_slider.value() / 100.0
-                preview_np = apply_specular_np(preview_np, self.roughness_preview_np, roughness_strength)
+            # NEW: Use improved specular method
+            specular_method_text = self.specular_method_selector.currentText()
+            method_map = {
+                "Roughness Inverted": "roughness",
+                "Metallic as Specular": "metallic", 
+                "Hybrid (Recommended)": "hybrid",
+                "Enhanced Roughness": "enhanced_roughness"
+            }
+            
+            specular_method = method_map.get(specular_method_text, "hybrid")
+            roughness_strength = self.roughness_slider.value() / 100.0
+            metallic_weight = self.metallic_weight_slider.value() / 100.0
+            roughness_weight = self.roughness_weight_slider.value() / 100.0
+            
+            preview_np = apply_specular_np_improved(
+                preview_np, 
+                roughness_np=self.roughness_preview_np,
+                metallic_np=self.metallic_other_preview_np,
+                specular_method=specular_method,
+                roughness_strength=roughness_strength,
+                metallic_weight=metallic_weight,
+                roughness_weight=roughness_weight
+            )
 
-        elif view_mode == "Roughness Map":
-            if self.roughness_preview_np is not None:
-                preview_np = self.roughness_preview_np
-        
         elif view_mode == "Metallic Map":
-            if self.metallic_other_preview_np is not None:
-                preview_np = self.metallic_other_preview_np
-            elif self.metallic_diffuse_preview_np is not None:
-                preview_np = self.metallic_diffuse_preview_np
-        
-        elif view_mode == "AO Map":
-            if self.ao_preview_np is not None:
-                preview_np = self.ao_preview_np
+            if self.metallic_other_preview_np is None:
+                self.clear_preview()
+                return
+                
+            darken_strength = self.metallic_darken_slider.value() / 100.0
+            preview_np = darken_metallic_np(self.metallic_other_preview_np, darken_strength)
 
         if preview_np is not None:
-            if preview_np.ndim == 2:
+            if preview_np.ndim == 2 or (preview_np.ndim == 3 and preview_np.shape[2] == 1):
                 preview_np = np.dstack((preview_np, preview_np, preview_np))
             self.show_preview(numpy_to_pil(preview_np))
         else:
             self.clear_preview()
 
-    # ---------- Texconv Helper Function ----------
+    # ---------- Updated Texconv Helper Function ----------
     def _save_with_texconv(self, pil_image, file_path, dds_format):
         texconv_path = os.path.join(os.path.dirname(sys.argv[0]), 'resources', 'texconv.exe')
         
         if not os.path.exists(texconv_path):
-            QMessageBox.critical(self, "Error", f"Could not find texconv.exe at: {texconv_path}\nMake sure it's in a 'resources' folder next to the script.")
+            QMessageBox.critical(self, "Error", f"No se pudo encontrar texconv.exe en: {texconv_path}\nAsegúrate de que esté en la carpeta 'resources' junto al script.")
             return
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_png_path = os.path.join(temp_dir, "temp_image.png")
-            pil_image.save(temp_png_path)
-            
-            try:
-                # Command to run texconv.exe
-                # -f [format] -o [output_dir] [input_file]
-                command = [texconv_path, "-f", dds_format, "-o", self.output_folder_path, temp_png_path]
-                
-                result = subprocess.run(command, check=True, capture_output=True, text=True)
-                print(f"Texconv Output: {result.stdout}")
-                print(f"Texconv Errors: {result.stderr}")
-                
-                QMessageBox.information(self, "Success", f"Texture saved as {dds_format} to {file_path}")
-            except subprocess.CalledProcessError as e:
-                QMessageBox.critical(self, "Conversion Error", f"Texconv failed with error: {e.stderr}\nCommand: {' '.join(command)}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
+        temp_png_path = tempfile.mktemp(suffix='.png')
+        if pil_image.mode not in ['RGB', 'RGBA', 'L']:
+            pil_image = pil_image.convert('RGBA')
+        pil_image.save(temp_png_path)
+        
+        try:
+            # Obtener directorio de salida y nombre del archivo
+            output_dir = os.path.dirname(file_path)
+            file_name_base = os.path.splitext(os.path.basename(file_path))[0]
 
+            # Construir comando sin comillas extra y usando el parámetro correcto
+            command = [
+                texconv_path,
+                "-f", dds_format,
+                "-ft", "dds",
+                temp_png_path,  # Sin comillas aquí
+                "-o", output_dir,  # Sin comillas aquí
+                "-y",  # Sobrescribir archivos existentes sin preguntar
+                "-nologo"
+            ]
+            
+            print("DEBUG TEXCONV COMMAND:", " ".join(command))
+            
+            # Ejecutar el comando
+            result = subprocess.run(command, check=True, capture_output=True, text=True, 
+                                  creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            
+            # El archivo generado por texconv tendrá el mismo nombre base pero con extensión .dds
+            generated_file = os.path.join(output_dir, os.path.splitext(os.path.basename(temp_png_path))[0] + ".dds")
+            final_file = file_path
+            
+            # Renombrar el archivo generado al nombre deseado
+            if os.path.exists(generated_file) and generated_file != final_file:
+                if os.path.exists(final_file):
+                    os.remove(final_file)  # Eliminar archivo existente si existe
+                os.rename(generated_file, final_file)
+            
+            print(f"Texconv Output: {result.stdout}")
+            QMessageBox.information(self, "Éxito", f"Textura guardada como {dds_format} en {file_path}")
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else e.stdout
+            QMessageBox.critical(self, "Error de Conversión", f"Texconv falló con error: {error_msg}\nComando: {' '.join(command)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Ocurrió un error inesperado: {e}")
+        finally:
+            # Limpiar archivo temporal
+            if os.path.exists(temp_png_path):
+                os.remove(temp_png_path)
 
     # ---------- Output Functions ----------
+    def _get_output_path(self, suffix):
+        """Helper function to validate and get the full output path."""
+        if not self.output_folder_path:
+            QMessageBox.warning(self, "Error", "Please select an output folder first.")
+            return None, None
+
+        prefix = self.prefix_line.text().strip()
+        if not prefix:
+            QMessageBox.warning(self, "Error", "Please enter a file prefix.")
+            return None, None
+        
+        filename = f"{prefix}_{suffix}.dds"
+        full_path = os.path.join(self.output_folder_path, filename)
+        return full_path, prefix
+
     def save_diffuse_output(self):
-        if self.albedo is None:
-            QMessageBox.warning(self, "Error", "No Albedo/Basecolor texture loaded.")
+        full_path, prefix = self._get_output_path("d")
+        if not full_path:
             return
 
-        if self.output_folder_path is None:
-            QMessageBox.warning(self, "Error", "Please select an output folder first.")
+        if self.albedo is None:
+            QMessageBox.warning(self, "Error", "No Albedo/Basecolor texture loaded.")
             return
             
         albedo_out_np = pil_to_numpy(self.albedo.copy())
         
         if self.ao is not None:
-            ao_strength = self.ao_slider.value() / 100.0
             ao_full_np = pil_to_numpy(self.ao.resize(self.albedo.size))
+            ao_strength = self.ao_slider.value() / 100.0
             albedo_out_np = apply_ao_to_albedo_np(albedo_out_np, ao_full_np, ao_strength)
         
         if self.metallic_diffuse is not None:
-            metallic_strength = self.darken_metallic_slider.value() / 100.0
             metallic_full_np = pil_to_numpy(self.metallic_diffuse.resize(self.albedo.size))
+            metallic_strength = self.darken_metallic_slider.value() / 100.0
             albedo_out_np = darken_albedo_metallic_np(albedo_out_np, metallic_full_np, metallic_strength)
             
         if self.mask is not None:
@@ -461,42 +677,86 @@ class MainWindow(QWidget):
             albedo_out_np = apply_opacity_mask_np(albedo_out_np, mask_full_np)
             
         out_pil = numpy_to_pil(albedo_out_np)
-
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Diffuse Texture", os.path.join(self.output_folder_path, "diffuse.dds"), "DDS (*.dds)")
         
-        if file_path:
-            self._save_with_texconv(out_pil, file_path, "BC3_UNORM")
-
+        self._save_with_texconv(out_pil, full_path, "BC3_UNORM")
 
     def save_normal_output(self):
+        full_path, prefix = self._get_output_path("n")
+        if not full_path:
+            return
+
         if self.normal is None:
             QMessageBox.warning(self, "Error", "No Normal texture loaded.")
             return
         
-        if self.output_folder_path is None:
-            QMessageBox.warning(self, "Error", "Please select an output folder first.")
-            return
-
         normal_out_np = pil_to_numpy(self.normal.copy())
         
         if self.normal_type_selector.currentText() == "OpenGL":
             normal_out_np = convert_normal_to_directx_np(normal_out_np)
         
+        # NEW: Use improved specular method for final output
+        specular_method_text = self.specular_method_selector.currentText()
+        method_map = {
+            "Roughness Inverted": "roughness",
+            "Metallic as Specular": "metallic", 
+            "Hybrid (Recommended)": "hybrid",
+            "Enhanced Roughness": "enhanced_roughness"
+        }
+        
+        specular_method = method_map.get(specular_method_text, "hybrid")
+        roughness_strength = self.roughness_slider.value() / 100.0
+        metallic_weight = self.metallic_weight_slider.value() / 100.0
+        roughness_weight = self.roughness_weight_slider.value() / 100.0
+        
+        # Get full resolution textures for final output
+        roughness_full_np = None
+        metallic_full_np = None
+        
         if self.roughness is not None:
-            roughness_strength = self.roughness_slider.value() / 100.0
             roughness_full_np = pil_to_numpy(self.roughness.resize(self.normal.size))
-            normal_out_np = apply_specular_np(normal_out_np, roughness_full_np, roughness_strength)
+            
+        if self.metallic_other is not None:
+            metallic_full_np = pil_to_numpy(self.metallic_other.resize(self.normal.size))
+        
+        normal_out_np = apply_specular_np_improved(
+            normal_out_np, 
+            roughness_np=roughness_full_np,
+            metallic_np=metallic_full_np,
+            specular_method=specular_method,
+            roughness_strength=roughness_strength,
+            metallic_weight=metallic_weight,
+            roughness_weight=roughness_weight
+        )
         
         out_pil = numpy_to_pil(normal_out_np)
-
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Normal Texture", os.path.join(self.output_folder_path, "normal.dds"), "DDS (*.dds)")
         
-        if file_path:
-            self._save_with_texconv(out_pil, file_path, "BC5_UNORM")
+        self._save_with_texconv(out_pil, full_path, "BC3_UNORM")
+            
+    def save_metallic_output(self):
+        full_path, prefix = self._get_output_path("m")
+        if not full_path:
+            return
+
+        if self.metallic_other is None:
+            QMessageBox.warning(self, "Error", "No Metallic texture loaded.")
+            return
+
+        metallic_out_np = pil_to_numpy(self.metallic_other.copy())
+        
+        darken_strength = self.metallic_darken_slider.value() / 100.0
+        metallic_out_np = darken_metallic_np(metallic_out_np, darken_strength)
+        
+        out_pil = numpy_to_pil(metallic_out_np)
+
+        self._save_with_texconv(out_pil, full_path, "BC3_UNORM")
 
     # ---------- Preview Helper ----------
     def show_preview(self, pil_img):
-        arr = np.array(pil_img.convert("RGBA"))
+        if pil_img.mode == 'L' or pil_img.mode == 'P':
+            arr = np.array(pil_img.convert('RGB'))
+        else:
+            arr = np.array(pil_img.convert('RGBA'))
+
         qimg = QImage(arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGBA8888)
         self.preview_label.setPixmap(QPixmap.fromImage(qimg))
 
