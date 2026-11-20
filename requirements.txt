@@ -1,0 +1,5 @@
+Pillow>=10
+numpy>=1.26
+PyQt5>=5.15
+scipy>=1.11
+moderngl>=5.12,<6
